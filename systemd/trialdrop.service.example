@@ -1,0 +1,16 @@
+[Unit]
+Description=TrialDrop Telegram bot
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/TrialDrop
+ExecStart=/root/TrialDrop/.venv/bin/python main.py
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/root/TrialDrop/.env
+
+[Install]
+WantedBy=multi-user.target
