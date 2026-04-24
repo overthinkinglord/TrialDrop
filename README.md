@@ -4,9 +4,9 @@ Telegram bot for tracking free trials and avoiding unwanted charges.
 
 You send a message like:
 
-`ChatGPT 14 дней $20`
+`ChatGPT | 14 дней | 20 долларов`
 
-The bot stores the trial, sends a reminder before the expected charge, and counts confirmed saved money after you mark the trial as canceled.
+The bot stores the trial, reminds you the day before it ends, and counts confirmed saved money only when a price was provided.
 
 ## Stack
 
@@ -68,6 +68,7 @@ python3 main.py
 - `REMINDER_POLL_SECONDS` — how often the worker checks due jobs
 - `REMINDER_BATCH_SIZE` — max due reminders per tick
 - `LOG_LEVEL` — default `INFO`
+- `APP_TIMEZONE` — bot-wide timezone for date-based reminders, default `Europe/Berlin`
 
 ## Commands
 
@@ -75,16 +76,15 @@ python3 main.py
 - `/add`
 - `/list`
 - `/stats`
-- `/timezone`
 - `/help`
 
 ## Project Layout
 
-- [main.py](/Users/admin/Dev/active/TrialDrop/main.py)
-- [trialtracker/app.py](/Users/admin/Dev/active/TrialDrop/trialtracker/app.py)
-- [trialtracker/database.py](/Users/admin/Dev/active/TrialDrop/trialtracker/database.py)
-- [trialtracker/parser.py](/Users/admin/Dev/active/TrialDrop/trialtracker/parser.py)
-- [TRIALDROP_MVP.md](/Users/admin/Dev/active/TrialDrop/TRIALDROP_MVP.md)
+- [main.py](/Users/admin/Dev/active/trialize/main.py)
+- [trialtracker/app.py](/Users/admin/Dev/active/trialize/trialtracker/app.py)
+- [trialtracker/database.py](/Users/admin/Dev/active/trialize/trialtracker/database.py)
+- [trialtracker/parser.py](/Users/admin/Dev/active/trialize/trialtracker/parser.py)
+- [TRIALDROP_MVP.md](/Users/admin/Dev/active/trialize/TRIALDROP_MVP.md)
 
 ## Deployment on VPS
 
@@ -109,7 +109,7 @@ nano .env
 python3 main.py --check
 ```
 
-Then create the service from [systemd/trialdrop.service.example](/Users/admin/Dev/active/TrialDrop/systemd/trialdrop.service.example).
+Then create the service from [systemd/trialdrop.service.example](/Users/admin/Dev/active/trialize/systemd/trialdrop.service.example).
 
 ## Update Flow on VPS
 

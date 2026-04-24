@@ -18,8 +18,6 @@ class TrialDraft:
             [
                 self.service_name,
                 self.service_key_normalized,
-                self.amount_minor is not None,
-                self.currency_code,
                 self.started_at,
                 self.billing_at,
             ]
@@ -27,8 +25,6 @@ class TrialDraft:
 
     def missing_fields(self) -> List[str]:
         missing: List[str] = []
-        if self.amount_minor is None or not self.currency_code:
-            missing.append("amount")
         if not self.billing_at:
             missing.append("date")
         return missing
@@ -55,4 +51,3 @@ class TrialDraft:
             billing_at=payload.get("billing_at"),
             raw_input=payload.get("raw_input", ""),
         )
-

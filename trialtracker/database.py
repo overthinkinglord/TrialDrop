@@ -54,8 +54,8 @@ class Database:
                 service_name TEXT NOT NULL,
                 service_key_normalized TEXT NOT NULL,
                 raw_input TEXT NOT NULL,
-                amount_minor INTEGER NOT NULL,
-                currency_code TEXT NOT NULL,
+                amount_minor INTEGER,
+                currency_code TEXT,
                 started_at TEXT NOT NULL,
                 billing_at TEXT NOT NULL,
                 status TEXT NOT NULL,
@@ -88,17 +88,72 @@ class Database:
                 created_at TEXT NOT NULL
             );
 
-            CREATE INDEX IF NOT EXISTS idx_trials_user_status
-                ON trials (user_id, status, billing_at);
-
-            CREATE INDEX IF NOT EXISTS idx_trials_service_key
-                ON trials (user_id, service_key_normalized, status);
-
-            CREATE INDEX IF NOT EXISTS idx_reminder_jobs_due
-                ON reminder_jobs (status, scheduled_at, claimed_at);
             """
         )
+        await self._migrate_trials_table_if_needed()
+        await conn.execute("DROP INDEX IF EXISTS idx_trials_user_status")
+        await conn.execute("DROP INDEX IF EXISTS idx_trials_service_key")
+        await conn.execute("DROP INDEX IF EXISTS idx_reminder_jobs_due")
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_trials_user_status ON trials (user_id, status, billing_at)"
+        )
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_trials_service_key ON trials (user_id, service_key_normalized, status)"
+        )
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_reminder_jobs_due ON reminder_jobs (status, scheduled_at, claimed_at)"
+        )
         await conn.commit()
+
+    async def _migrate_trials_table_if_needed(self) -> None:
+        conn = self._require_conn()
+        cursor = await conn.execute("PRAGMA table_info(trials)")
+        rows = await cursor.fetchall()
+        if not rows:
+            return
+
+        by_name = {row["name"]: row for row in rows}
+        amount_is_optional = bool(by_name.get("amount_minor")) and by_name["amount_minor"]["notnull"] == 0
+        currency_is_optional = bool(by_name.get("currency_code")) and by_name["currency_code"]["notnull"] == 0
+        if amount_is_optional and currency_is_optional:
+            return
+
+        await conn.execute("PRAGMA foreign_keys = OFF")
+        await conn.execute("ALTER TABLE trials RENAME TO trials_old")
+        await conn.execute(
+            """
+            CREATE TABLE trials (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL REFERENCES users(id),
+                service_name TEXT NOT NULL,
+                service_key_normalized TEXT NOT NULL,
+                raw_input TEXT NOT NULL,
+                amount_minor INTEGER,
+                currency_code TEXT,
+                started_at TEXT NOT NULL,
+                billing_at TEXT NOT NULL,
+                status TEXT NOT NULL,
+                source TEXT NOT NULL,
+                snooze_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        await conn.execute(
+            """
+            INSERT INTO trials (
+                id, user_id, service_name, service_key_normalized, raw_input, amount_minor, currency_code,
+                started_at, billing_at, status, source, snooze_count, created_at, updated_at
+            )
+            SELECT
+                id, user_id, service_name, service_key_normalized, raw_input, amount_minor, currency_code,
+                started_at, billing_at, status, source, snooze_count, created_at, updated_at
+            FROM trials_old
+            """
+        )
+        await conn.execute("DROP TABLE trials_old")
+        await conn.execute("PRAGMA foreign_keys = ON")
 
     async def upsert_user(self, telegram_user: Any, now_iso: str) -> dict:
         conn = self._require_conn()
@@ -315,6 +370,8 @@ class Database:
             FROM trials
             WHERE user_id = ?
               AND status = 'canceled_confirmed'
+              AND amount_minor IS NOT NULL
+              AND currency_code IS NOT NULL
             GROUP BY currency_code
             ORDER BY currency_code ASC
             """,
@@ -322,6 +379,21 @@ class Database:
         )
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
+
+    async def count_canceled_without_amount(self, user_id: int) -> int:
+        conn = self._require_conn()
+        cursor = await conn.execute(
+            """
+            SELECT COUNT(*) AS total
+            FROM trials
+            WHERE user_id = ?
+              AND status = 'canceled_confirmed'
+              AND (amount_minor IS NULL OR currency_code IS NULL)
+            """,
+            (user_id,),
+        )
+        row = await cursor.fetchone()
+        return int(row["total"]) if row else 0
 
     async def count_active_trials(self, user_id: int) -> int:
         conn = self._require_conn()

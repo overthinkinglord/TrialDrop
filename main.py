@@ -17,7 +17,6 @@ async def configure_commands(bot: Bot) -> None:
             BotCommand(command="add", description="How to add a trial"),
             BotCommand(command="list", description="Show active trials"),
             BotCommand(command="stats", description="Show saved money"),
-            BotCommand(command="timezone", description="Set timezone"),
             BotCommand(command="help", description="Show help"),
         ]
     )
