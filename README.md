@@ -6,6 +6,10 @@ You send a message like:
 
 `ChatGPT | 14 дней | 20 долларов`
 
+Or add a trial retroactively:
+
+`Claude | с 10 апреля | 14 дней | 20 евро`
+
 The bot stores the trial, reminds you the day before it ends, and counts confirmed saved money only when a price was provided.
 
 ## Stack

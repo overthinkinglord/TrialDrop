@@ -69,6 +69,7 @@ def build_dispatcher(database: Database, settings: Settings) -> Dispatcher:
                         "2 недели",
                         "полмесяца",
                         "5 мая",
+                        "или: с 10 апреля на 14 дней",
                     ]
                 )
             )
@@ -129,6 +130,10 @@ def build_dispatcher(database: Database, settings: Settings) -> Dispatcher:
             "Сохранил.",
             f"Напомню за день до конца trial: {format_billing_date(reminder_at, settings.app_timezone)}",
         ]
+        if is_backfilled_trial(draft, settings.app_timezone):
+            lines.append(
+                f"Записал это как уже начавшийся trial со стартом {format_billing_date(draft.started_at, settings.app_timezone)}."
+            )
         if draft.amount_minor is None or not draft.currency_code:
             lines.append("Цена не указана. Напомню все равно, но в сэкономленное ее не посчитаю.")
         await target.answer("\n".join(lines))
@@ -518,6 +523,8 @@ def build_preview_text(draft: TrialDraft, timezone_name: str) -> str:
         f"Сервис: {draft.service_name}",
         f"До конца trial: {format_billing_date(draft.billing_at, timezone_name)}" if draft.billing_at else "До конца trial: не указано",
     ]
+    if is_backfilled_trial(draft, timezone_name):
+        lines.append(f"Старт trial: {format_billing_date(draft.started_at, timezone_name)}")
     if draft.amount_minor is not None and draft.currency_code:
         lines.append(f"Стоимость, если не отменить: {format_money(draft.amount_minor, draft.currency_code)}")
     else:
@@ -555,14 +562,17 @@ def build_input_help_text() -> str:
             "",
             "Пример:",
             "ChatGPT | 14 дней | 20 долларов",
+            "Claude | с 10 апреля | 14 дней | 20 евро",
             "",
             "Формат:",
             "название сервиса | срок trial или дата конца | стоимость подписки (необязательно)",
+            "или: название сервиса | дата старта | срок trial | стоимость подписки (необязательно)",
             "",
             "Тоже пойму:",
             "Claude 2 недели",
             "Cursor на месяц",
             "Cloud 3 months 10 usd",
+            "ChatGPT started 3 days ago for 14 days",
         ]
     )
 
@@ -574,15 +584,26 @@ def build_parse_failed_text() -> str:
             "",
             "Попробуй так:",
             "ChatGPT | 14 дней | 20 долларов",
+            "Claude | с 10 апреля | 14 дней | 20 евро",
             "",
             "Или проще:",
             "Claude 2 недели",
+            "ChatGPT started 3 days ago for 14 days",
         ]
     )
 
 
 def now_utc_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def is_backfilled_trial(draft: TrialDraft, timezone_name: str) -> bool:
+    if not draft.started_at:
+        return False
+    tz = ZoneInfo(timezone_name)
+    started_date = datetime.fromisoformat(draft.started_at).astimezone(tz).date()
+    today = datetime.now(tz).date()
+    return started_date < today
 
 
 async def strip_inline_keyboard(callback: CallbackQuery) -> None:

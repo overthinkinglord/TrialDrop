@@ -43,6 +43,29 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(draft.amount_minor, 30000)
         self.assertEqual(draft.currency_code, "UAH")
 
+    def test_parse_retroactive_structured_trial(self) -> None:
+        draft = parse_trial_text(
+            "Claude | с 10 апреля | 14 дней | 20 евро",
+            timezone_name="Europe/Berlin",
+            now=self.now,
+        )
+        self.assertIsNotNone(draft)
+        self.assertEqual(draft.service_name, "Claude")
+        self.assertEqual(draft.currency_code, "EUR")
+        self.assertTrue(draft.started_at.startswith("2026-04-10"))
+        self.assertTrue(draft.billing_at.startswith("2026-04-24"))
+
+    def test_parse_retroactive_relative_trial(self) -> None:
+        draft = parse_trial_text(
+            "ChatGPT started 3 days ago for 14 days",
+            timezone_name="Europe/Berlin",
+            now=self.now,
+        )
+        self.assertIsNotNone(draft)
+        self.assertEqual(draft.service_name, "ChatGPT")
+        self.assertTrue(draft.started_at.startswith("2026-04-19"))
+        self.assertTrue(draft.billing_at.startswith("2026-05-03"))
+
     def test_ignore_plain_text_without_trial_signal(self) -> None:
         draft = parse_trial_text("просто привет как дела", timezone_name="Europe/Berlin", now=self.now)
         self.assertIsNone(draft)

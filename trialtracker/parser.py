@@ -198,6 +198,21 @@ RELATIVE_DAY_PATTERNS = {
     "tomorrow": 1,
 }
 
+START_RELATIVE_DAY_PATTERNS = {
+    "сегодня": 0,
+    "today": 0,
+    "вчера": -1,
+    "yesterday": -1,
+}
+
+START_PREFIX_PATTERNS = [
+    re.compile(r"\b(?:с|from)\s+", re.IGNORECASE),
+    re.compile(
+        r"\b(?:start(?:ed)?|начал(?:а|и)?|оформил(?:а|и)?|подключил(?:а|и)?|взял(?:а|и)?)\s+",
+        re.IGNORECASE,
+    ),
+]
+
 SERVICE_ALIASES = {
     "chat gpt": "chatgpt",
     "chatgpt": "chatgpt",
@@ -236,11 +251,18 @@ FILLER_PATTERNS = [
     r"\btrial\b",
     r"\brenews?\b",
     r"\brenews?\s+on\b",
+    r"\bstart(?:ed)?\b",
+    r"\bначал(?:а|и)?\b",
+    r"\bоформил(?:а|и)?\b",
+    r"\bподключил(?:а|и)?\b",
+    r"\bвзял(?:а|и)?\b",
     r"\bon\b",
     r"\bдо\b",
     r"\bчерез\b",
     r"\bна\b",
+    r"\bс\b",
     r"\bfor\b",
+    r"\bfrom\b",
     r"\buntil\b",
 ]
 
@@ -255,6 +277,20 @@ class AmountMatch:
 @dataclass
 class DateMatch:
     billing_at_utc: datetime
+    remaining_text: str
+
+
+@dataclass
+class DurationMatch:
+    unit: str
+    count: int
+    remaining_text: str
+
+
+@dataclass
+class StartMatch:
+    started_at_utc: datetime
+    started_local: datetime
     remaining_text: str
 
 
@@ -276,6 +312,19 @@ def parse_trial_text(
 
     amount_match = parse_amount_fragment(clean_text)
     text_without_amount = amount_match.remaining_text if amount_match else clean_text
+
+    retro_draft = parse_retroactive_trial(
+        text=text_without_amount,
+        timezone_name=timezone_name,
+        now=now_utc,
+        amount_match=amount_match,
+        raw_input=clean_text,
+    )
+    if retro_draft:
+        return retro_draft
+    if looks_like_start_reference(text_without_amount):
+        return None
+
     date_match = parse_date_fragment(text_without_amount, timezone_name=timezone_name, now=now_utc)
     text_without_parts = date_match.remaining_text if date_match else text_without_amount
 
@@ -311,6 +360,12 @@ def parse_structured_trial(
     if not service_raw:
         return None
 
+    retro_draft = parse_structured_retroactive_trial(parts=parts, timezone_name=timezone_name, now=now)
+    if retro_draft:
+        return retro_draft
+    if len(parts) >= 2 and looks_like_start_reference(parts[1]):
+        return None
+
     date_match = parse_date_fragment(parts[1], timezone_name=timezone_name, now=now)
     amount_match = parse_amount_fragment(parts[2]) if len(parts) >= 3 else None
 
@@ -323,6 +378,71 @@ def parse_structured_trial(
         started_at=started_at.replace(microsecond=0).isoformat(),
         billing_at=date_match.billing_at_utc.replace(microsecond=0).isoformat() if date_match else None,
         raw_input=" | ".join(parts),
+    )
+
+
+def parse_structured_retroactive_trial(
+    parts: list[str],
+    timezone_name: str,
+    now: datetime,
+) -> Optional[TrialDraft]:
+    if len(parts) < 3:
+        return None
+
+    service_raw = cleanup_service_name(parts[0])
+    if not service_raw:
+        return None
+
+    start_match = parse_start_fragment(parts[1], timezone_name=timezone_name, now=now)
+    if not start_match:
+        return None
+
+    duration_match = parse_duration_value(parts[2])
+    if not duration_match:
+        return None
+
+    amount_match = parse_amount_fragment(parts[3]) if len(parts) >= 4 else None
+    billing_local = add_relative_period(start_match.started_local, duration_match.unit, duration_match.count)
+
+    return TrialDraft(
+        service_name=canonical_service_name(service_raw),
+        service_key_normalized=normalize_service_key(service_raw),
+        amount_minor=amount_match.amount_minor if amount_match else None,
+        currency_code=amount_match.currency_code if amount_match else None,
+        started_at=start_match.started_at_utc.replace(microsecond=0).isoformat(),
+        billing_at=billing_local.astimezone(timezone.utc).replace(microsecond=0).isoformat(),
+        raw_input=" | ".join(parts),
+    )
+
+
+def parse_retroactive_trial(
+    text: str,
+    timezone_name: str,
+    now: datetime,
+    amount_match: Optional[AmountMatch],
+    raw_input: str,
+) -> Optional[TrialDraft]:
+    start_match = parse_start_fragment(text, timezone_name=timezone_name, now=now)
+    if not start_match:
+        return None
+
+    duration_match = parse_duration_value(start_match.remaining_text)
+    if not duration_match:
+        return None
+
+    service_name = cleanup_service_name(duration_match.remaining_text)
+    if not service_name:
+        return None
+
+    billing_local = add_relative_period(start_match.started_local, duration_match.unit, duration_match.count)
+    return TrialDraft(
+        service_name=canonical_service_name(service_name),
+        service_key_normalized=normalize_service_key(service_name),
+        amount_minor=amount_match.amount_minor if amount_match else None,
+        currency_code=amount_match.currency_code if amount_match else None,
+        started_at=start_match.started_at_utc.replace(microsecond=0).isoformat(),
+        billing_at=billing_local.astimezone(timezone.utc).replace(microsecond=0).isoformat(),
+        raw_input=raw_input,
     )
 
 
@@ -410,98 +530,97 @@ def parse_date_fragment(
     if duration_match:
         return duration_match
 
-    iso_match = re.search(r"\b(?P<year>\d{4})-(?P<month>\d{1,2})-(?P<day>\d{1,2})\b", text)
-    if iso_match:
-        billing_local = build_local_datetime(
-            now_local=local_now,
-            day=int(iso_match.group("day")),
-            month=int(iso_match.group("month")),
-            year=int(iso_match.group("year")),
+    explicit_date = parse_future_date_anywhere(text, local_now)
+    if explicit_date:
+        billing_local, consumed = explicit_date
+        remaining_text = (text[: consumed[0]] + " " + text[consumed[1] :]).strip()
+        return DateMatch(
+            billing_at_utc=billing_local.astimezone(timezone.utc),
+            remaining_text=" ".join(remaining_text.split()),
         )
-        if billing_local:
-            remaining_text = (text[: iso_match.start()] + " " + text[iso_match.end() :]).strip()
-            return DateMatch(
-                billing_at_utc=billing_local.astimezone(timezone.utc),
+
+    return None
+
+
+def parse_start_fragment(
+    text: str,
+    timezone_name: str,
+    now: Optional[datetime] = None,
+) -> Optional[StartMatch]:
+    now_utc = now or datetime.now(timezone.utc)
+    local_now = now_utc.astimezone(ZoneInfo(timezone_name))
+
+    relative_pattern = re.compile(
+        r"\b(?P<count>\d{1,3}|[A-Za-zА-Яа-я]+)\s+"
+        r"(?P<unit>days?|day|d|день|дня|дней|weeks?|week|неделя|недели|недель|"
+        r"months?|month|месяц|месяца|месяцев|years?|year|год|года|лет)\s+"
+        r"(?P<ago>ago|назад)\b",
+        re.IGNORECASE,
+    )
+    match = relative_pattern.search(text)
+    if match:
+        count = resolve_count(match.group("count"))
+        unit = DURATION_UNITS.get(match.group("unit").lower())
+        if count is not None and unit is not None:
+            started_local = subtract_relative_period(local_now, unit=unit, count=count)
+            remaining_text = (text[: match.start()] + " " + text[match.end() :]).strip()
+            return StartMatch(
+                started_at_utc=started_local.astimezone(timezone.utc),
+                started_local=started_local,
                 remaining_text=" ".join(remaining_text.split()),
             )
 
-    numeric_match = re.search(
-        r"\b(?P<day>\d{1,2})[./-](?P<month>\d{1,2})(?:[./-](?P<year>\d{2,4}))?\b",
-        text,
-    )
-    if numeric_match:
-        year = numeric_match.group("year")
-        billing_local = build_local_datetime(
-            now_local=local_now,
-            day=int(numeric_match.group("day")),
-            month=int(numeric_match.group("month")),
-            year=int(expand_year(year)) if year else None,
+    for keyword, offset in START_RELATIVE_DAY_PATTERNS.items():
+        match = re.search(rf"\b{re.escape(keyword)}\b", text, re.IGNORECASE)
+        if not match:
+            continue
+        started_local = normalize_billing_local(local_now + timedelta(days=offset))
+        remaining_text = (text[: match.start()] + " " + text[match.end() :]).strip()
+        return StartMatch(
+            started_at_utc=started_local.astimezone(timezone.utc),
+            started_local=started_local,
+            remaining_text=" ".join(remaining_text.split()),
         )
-        if billing_local:
-            remaining_text = (text[: numeric_match.start()] + " " + text[numeric_match.end() :]).strip()
-            return DateMatch(
-                billing_at_utc=billing_local.astimezone(timezone.utc),
-                remaining_text=" ".join(remaining_text.split()),
-            )
 
-    day_month_match = re.search(
-        r"\b(?P<day>\d{1,2})\s+(?P<month_name>[A-Za-zА-Яа-я]+)(?:\s+(?P<year>\d{4}))?\b",
-        text,
-        re.IGNORECASE,
-    )
-    if day_month_match:
-        month = month_from_name(day_month_match.group("month_name"))
-        if month:
-            billing_local = build_local_datetime(
-                now_local=local_now,
-                day=int(day_month_match.group("day")),
-                month=month,
-                year=int(day_month_match.group("year")) if day_month_match.group("year") else None,
-            )
-            if billing_local:
-                remaining_text = (
-                    text[: day_month_match.start()] + " " + text[day_month_match.end() :]
-                ).strip()
-                return DateMatch(
-                    billing_at_utc=billing_local.astimezone(timezone.utc),
-                    remaining_text=" ".join(remaining_text.split()),
-                )
-
-    month_day_match = re.search(
-        r"\b(?P<month_name>[A-Za-z]+)\s+(?P<day>\d{1,2})(?:,\s*(?P<year>\d{4}))?\b",
-        text,
-        re.IGNORECASE,
-    )
-    if month_day_match:
-        month = month_from_name(month_day_match.group("month_name"))
-        if month:
-            billing_local = build_local_datetime(
-                now_local=local_now,
-                day=int(month_day_match.group("day")),
-                month=month,
-                year=int(month_day_match.group("year")) if month_day_match.group("year") else None,
-            )
-            if billing_local:
-                remaining_text = (
-                    text[: month_day_match.start()] + " " + text[month_day_match.end() :]
-                ).strip()
-                return DateMatch(
-                    billing_at_utc=billing_local.astimezone(timezone.utc),
-                    remaining_text=" ".join(remaining_text.split()),
-                )
+    for pattern in START_PREFIX_PATTERNS:
+        match = pattern.search(text)
+        if not match:
+            continue
+        suffix = text[match.end() :].strip()
+        explicit = parse_past_date_at_start(suffix, local_now)
+        if not explicit:
+            continue
+        started_local, consumed_len = explicit
+        remaining_text = (text[: match.start()] + " " + suffix[consumed_len:]).strip()
+        return StartMatch(
+            started_at_utc=started_local.astimezone(timezone.utc),
+            started_local=started_local,
+            remaining_text=" ".join(remaining_text.split()),
+        )
 
     return None
 
 
 def parse_duration_fragment(text: str, local_now: datetime) -> Optional[DateMatch]:
+    duration_match = parse_duration_value(text)
+    if not duration_match:
+        return None
+    billing_local = add_relative_period(local_now, unit=duration_match.unit, count=duration_match.count)
+    return DateMatch(
+        billing_at_utc=billing_local.astimezone(timezone.utc),
+        remaining_text=duration_match.remaining_text,
+    )
+
+
+def parse_duration_value(text: str) -> Optional[DurationMatch]:
     for pattern, (unit, count) in SPECIAL_DURATION_PATTERNS:
         match = pattern.search(text)
         if not match:
             continue
-        billing_local = add_relative_period(local_now, unit=unit, count=count)
         remaining_text = (text[: match.start()] + " " + text[match.end() :]).strip()
-        return DateMatch(
-            billing_at_utc=billing_local.astimezone(timezone.utc),
+        return DurationMatch(
+            unit=unit,
+            count=count,
             remaining_text=" ".join(remaining_text.split()),
         )
 
@@ -520,12 +639,124 @@ def parse_duration_fragment(text: str, local_now: datetime) -> Optional[DateMatc
     if count is None or unit is None:
         return None
 
-    billing_local = add_relative_period(local_now, unit=unit, count=count)
     remaining_text = (text[: match.start()] + " " + text[match.end() :]).strip()
-    return DateMatch(
-        billing_at_utc=billing_local.astimezone(timezone.utc),
+    return DurationMatch(
+        unit=unit,
+        count=count,
         remaining_text=" ".join(remaining_text.split()),
     )
+
+
+def parse_future_date_anywhere(text: str, local_now: datetime) -> Optional[tuple[datetime, tuple[int, int]]]:
+    patterns = [
+        (
+            re.compile(r"\b(?P<year>\d{4})-(?P<month>\d{1,2})-(?P<day>\d{1,2})\b"),
+            lambda m: build_local_datetime(
+                now_local=local_now,
+                day=int(m.group("day")),
+                month=int(m.group("month")),
+                year=int(m.group("year")),
+            ),
+        ),
+        (
+            re.compile(r"\b(?P<day>\d{1,2})[./-](?P<month>\d{1,2})(?:[./-](?P<year>\d{2,4}))?\b"),
+            lambda m: build_local_datetime(
+                now_local=local_now,
+                day=int(m.group("day")),
+                month=int(m.group("month")),
+                year=int(expand_year(m.group("year"))) if m.group("year") else None,
+            ),
+        ),
+        (
+            re.compile(
+                r"\b(?P<day>\d{1,2})\s+(?P<month_name>[A-Za-zА-Яа-я]+)(?:\s+(?P<year>\d{4}))?\b",
+                re.IGNORECASE,
+            ),
+            lambda m: build_local_datetime(
+                now_local=local_now,
+                day=int(m.group("day")),
+                month=month_from_name(m.group("month_name")) or 0,
+                year=int(m.group("year")) if m.group("year") else None,
+            ),
+        ),
+        (
+            re.compile(
+                r"\b(?P<month_name>[A-Za-z]+)\s+(?P<day>\d{1,2})(?:,\s*(?P<year>\d{4}))?\b",
+                re.IGNORECASE,
+            ),
+            lambda m: build_local_datetime(
+                now_local=local_now,
+                day=int(m.group("day")),
+                month=month_from_name(m.group("month_name")) or 0,
+                year=int(m.group("year")) if m.group("year") else None,
+            ),
+        ),
+    ]
+    for pattern, builder in patterns:
+        match = pattern.search(text)
+        if not match:
+            continue
+        candidate = builder(match)
+        if candidate is None:
+            continue
+        return candidate, (match.start(), match.end())
+    return None
+
+
+def parse_past_date_at_start(text: str, local_now: datetime) -> Optional[tuple[datetime, int]]:
+    patterns = [
+        (
+            re.compile(r"^(?P<year>\d{4})-(?P<month>\d{1,2})-(?P<day>\d{1,2})\b"),
+            lambda m: build_past_local_datetime(
+                now_local=local_now,
+                day=int(m.group("day")),
+                month=int(m.group("month")),
+                year=int(m.group("year")),
+            ),
+        ),
+        (
+            re.compile(r"^(?P<day>\d{1,2})[./-](?P<month>\d{1,2})(?:[./-](?P<year>\d{2,4}))?\b"),
+            lambda m: build_past_local_datetime(
+                now_local=local_now,
+                day=int(m.group("day")),
+                month=int(m.group("month")),
+                year=int(expand_year(m.group("year"))) if m.group("year") else None,
+            ),
+        ),
+        (
+            re.compile(
+                r"^(?P<day>\d{1,2})\s+(?P<month_name>[A-Za-zА-Яа-я]+)(?:\s+(?P<year>\d{4}))?\b",
+                re.IGNORECASE,
+            ),
+            lambda m: build_past_local_datetime(
+                now_local=local_now,
+                day=int(m.group("day")),
+                month=month_from_name(m.group("month_name")) or 0,
+                year=int(m.group("year")) if m.group("year") else None,
+            ),
+        ),
+        (
+            re.compile(
+                r"^(?P<month_name>[A-Za-z]+)\s+(?P<day>\d{1,2})(?:,\s*(?P<year>\d{4}))?\b",
+                re.IGNORECASE,
+            ),
+            lambda m: build_past_local_datetime(
+                now_local=local_now,
+                day=int(m.group("day")),
+                month=month_from_name(m.group("month_name")) or 0,
+                year=int(m.group("year")) if m.group("year") else None,
+            ),
+        ),
+    ]
+    for pattern, builder in patterns:
+        match = pattern.search(text)
+        if not match:
+            continue
+        candidate = builder(match)
+        if candidate is None:
+            continue
+        return candidate, match.end()
+    return None
 
 
 def resolve_count(value: str) -> Optional[int]:
@@ -543,6 +774,18 @@ def add_relative_period(local_now: datetime, unit: str, count: int) -> datetime:
         return normalize_billing_local(add_months(local_now, count))
     if unit == "years":
         return normalize_billing_local(add_months(local_now, count * 12))
+    raise ValueError(f"Unsupported duration unit: {unit}")
+
+
+def subtract_relative_period(local_now: datetime, unit: str, count: int) -> datetime:
+    if unit == "days":
+        return normalize_billing_local(local_now - timedelta(days=count))
+    if unit == "weeks":
+        return normalize_billing_local(local_now - timedelta(weeks=count))
+    if unit == "months":
+        return normalize_billing_local(add_months(local_now, -count))
+    if unit == "years":
+        return normalize_billing_local(add_months(local_now, -(count * 12)))
     raise ValueError(f"Unsupported duration unit: {unit}")
 
 
@@ -569,6 +812,8 @@ def build_local_datetime(
     month: int,
     year: Optional[int],
 ) -> Optional[datetime]:
+    if month <= 0:
+        return None
     target_year = year or now_local.year
     try:
         candidate = normalize_billing_local(
@@ -586,6 +831,34 @@ def build_local_datetime(
     return candidate
 
 
+def build_past_local_datetime(
+    now_local: datetime,
+    day: int,
+    month: int,
+    year: Optional[int],
+) -> Optional[datetime]:
+    if month <= 0:
+        return None
+    target_year = year or now_local.year
+    try:
+        candidate = normalize_billing_local(
+            now_local.replace(year=target_year, month=month, day=day)
+        )
+    except ValueError:
+        return None
+
+    if year is None and candidate.date() > now_local.date():
+        try:
+            candidate = candidate.replace(year=candidate.year - 1)
+        except ValueError:
+            return None
+
+    if candidate.date() > now_local.date():
+        return None
+
+    return candidate
+
+
 def expand_year(year_text: str) -> int:
     year = int(year_text)
     if year < 100:
@@ -595,6 +868,17 @@ def expand_year(year_text: str) -> int:
 
 def month_from_name(value: str) -> Optional[int]:
     return MONTH_ALIASES.get(value.strip().lower())
+
+
+def looks_like_start_reference(text: str) -> bool:
+    lowered = text.lower()
+    if "назад" in lowered or "ago" in lowered or "вчера" in lowered or "yesterday" in lowered:
+        return True
+    if re.search(r"\b(?:с|from)\s+\d", lowered):
+        return True
+    if re.search(r"\b(?:с|from)\s+[a-zа-я]", lowered):
+        return True
+    return any(pattern.search(text) is not None for pattern in START_PREFIX_PATTERNS)
 
 
 def normalize_service_key(service_name: str) -> str:
@@ -634,4 +918,3 @@ def cleanup_service_name(text: str) -> str:
     cleaned = re.sub(r"[,:;]+", " ", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned)
     return cleaned.strip(" .-|")
-
